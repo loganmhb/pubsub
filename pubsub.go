@@ -42,7 +42,8 @@ func receiveMessages(p peer, topic *topic) {
 
 		for _, recipient := range topic.subscribers {
 			// Non-blocking send here, so that one bad peer doesn't prevent
-			// delivery to the others.
+			// delivery to the others. If the recipient's outbox is full, they just
+			// won't receive the message.
 			if p != *recipient {
 				select {
 				case recipient.outbox <- line:
