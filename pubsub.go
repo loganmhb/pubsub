@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strings"
 )
 
 // Basic idea: simplest possible pub/sub server (just TCP, no persistence, etc)
@@ -14,20 +15,62 @@ import (
 // Subscriptions are kept in a global hashmap of string -> topic, where string is the
 // topic name and topic is a struct that holds a channel for every subscriber.
 
-// But first, even simpler: just broadcast messages.
+// = The protocol =//
+//
+// A message is a line of text sent over a TCP connection. It can be
+// either a publication or a subscription.
+//
+// A line containing a colon is a publication to
+// '<topic>:<message>'. Messages may contain subsequent colons but
+// topic names cannot contain any.
+//
+// A message that does _not_ contain a colon is treated as a topic
+// name, and the peer is subscribed to that topic.
+//
+// = Design for Topics = //
+//
+// Peers can subscribe to any number of topics, and publish to any topic.
+// If the topic doesn't yet exist, subscribing to it will create it. Publishing to
+// a topic to which no peers are subscribed is a no-op.
+//
+// Subscriptions are stored in a map of topic name (string) to list of
+// inboxes (a channel belonging to a peer). In order to subscribe to a
+// new topic, a peer sends a message on a special subscription channel
+// with the peer's inbox and the desired topic name. When a peer
+// connects, two goroutines start: one to parse messages coming in on
+// the connection and send them to the broker for distribution, and
+// one to write broadcasted messages from the broker back to the
+// client.
+//
+// Disconnected peers are currently not handled, which is a problem if this thing
+// runs for long enough, of course.
 
-type peer struct {
-	outbox chan string
-	conn   net.Conn
+type Peer struct {
+	inbox chan Msg
+	conn  net.Conn
 }
 
-type topic struct {
-	subscribers []*peer
+type Topic [](chan Msg)
+
+type Msg struct {
+	body  string
+	topic string
 }
 
-func receiveMessages(p peer, topic *topic) {
+type Subscription struct {
+	topic string
+	inbox chan Msg
+}
+
+type Broker struct {
+	subscriptions chan Subscription
+	broadcasts    chan Msg
+}
+
+// Parses messages from the peer's TCP connection and forwards them to
+// the broker for broadcasting.
+func sendBroadcasts(p Peer, broker *Broker) {
 	reader := bufio.NewReader(p.conn)
-	defer p.conn.Close()
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -40,27 +83,32 @@ func receiveMessages(p peer, topic *topic) {
 			break
 		}
 
-		for _, recipient := range topic.subscribers {
-			// Non-blocking send here, so that one bad peer doesn't prevent
-			// delivery to the others. If the recipient's outbox is full, they just
-			// won't receive the message.
-			if p != *recipient {
-				select {
-				case recipient.outbox <- line:
-					fmt.Println("delivered line to peer")
-					continue
-				default:
-					fmt.Println("Failed to deliver message; peer's outbox is full.")
-				}
+		if strings.Contains(line, ":") {
+			// It's a pub.
+			idx := strings.Index(line, ":")
+			msg := Msg{topic: line[:idx], body: line[idx:]}
+			broker.broadcasts <- msg
+		} else {
+			topic := line[0:1]
+			fmt.Println("Topic contains newline?")
+			fmt.Println(strings.Contains(topic, "\n"))
+			for _, chr := range(topic) {
+				fmt.Println((int)(chr))
 			}
+			broker.subscriptions <- Subscription{
+				inbox: p.inbox,
+				topic: strings.Trim(line, "\r\n")}
 		}
 	}
 }
 
-func deliverMessages(p peer, outbox chan string) {
-	for {
-		msg := <-outbox
-		_, err := p.conn.Write(([]byte)(msg))
+// Listens for broadcasts arriving in the peer's inbox and writes them
+// out on the TCP connection.
+func deliverBroadcasts(p Peer) {
+	for msg := range(p.inbox) {
+		fmt.Println("Got a message!")
+		payload := msg.topic + ": " + msg.body
+		_, err := p.conn.Write(([]byte)(payload))
 		if err != nil {
 			fmt.Println("Error writing to conn: ", err)
 			break
@@ -68,16 +116,47 @@ func deliverMessages(p peer, outbox chan string) {
 	}
 }
 
-func handleConnection(conn net.Conn, topic *topic) *peer {
+func connectPeer(conn net.Conn, broker *Broker) *Peer {
 	// Each conn requires two goroutines: one to listen for incoming messages,
 	// and one to deliver outgoing messages.
-	outbox := make(chan string, 100)
+	inbox := make(chan Msg, 100)
 
-	s := peer{outbox: outbox, conn: conn}
-	go receiveMessages(s, topic)
-	go deliverMessages(s, outbox)
+	peer := Peer{inbox: inbox, conn: conn}
+	go deliverBroadcasts(peer)
+	go sendBroadcasts(peer, broker)
 
-	return &s
+	return &peer
+}
+
+func runBroker(broker Broker) {
+	topics := make(map[string]Topic)
+	for {
+		fmt.Println("Selecting...")
+		select {
+		case sub := <-broker.subscriptions:
+			fmt.Println("Got a subscription.")
+			topic, topicExists := topics[sub.topic]
+			if !topicExists {
+				topic = make(Topic, 0)
+			}
+			topics[sub.topic] = append(topic, sub.inbox)
+		case msg := <-broker.broadcasts:
+			fmt.Println("Got a broadcast.")
+			fmt.Println("Topic: ", msg.topic)
+			topic, _ := topics[msg.topic]
+			for _, recipient := range(topic) {
+				fmt.Println("Attempting delivery...")
+				// Non-blocking send. If recipient's inbox is full, they
+				// don't get the message.
+				select {
+				case recipient <- msg:
+					continue
+				default:
+					fmt.Println("Failed to deliver message to peer.")
+				}
+			}
+		}
+	}
 }
 
 func main() {
@@ -87,16 +166,18 @@ func main() {
 		panic(err)
 	}
 
-	mainTopic := topic{subscribers: make([]*peer, 0)}
+	outbox := make(chan Msg, 100)
+	subscriptions := make(chan Subscription, 100)
+	broker := Broker{broadcasts: outbox, subscriptions: subscriptions}
+
+	go runBroker(broker)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err)
 		} else {
-			peerPtr := handleConnection(conn, &mainTopic)
-			mainTopic.subscribers = append(mainTopic.subscribers, peerPtr)
-			// TOOD: how to remove closed connections from this slice?
+			connectPeer(conn, &broker)
 		}
 	}
 }
