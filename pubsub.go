@@ -86,15 +86,9 @@ func sendBroadcasts(p Peer, broker *Broker) {
 		if strings.Contains(line, ":") {
 			// It's a pub.
 			idx := strings.Index(line, ":")
-			msg := Msg{topic: line[:idx], body: line[idx:]}
+			msg := Msg{topic: line[:idx], body: line[idx+1:]}
 			broker.broadcasts <- msg
 		} else {
-			topic := line[0:1]
-			fmt.Println("Topic contains newline?")
-			fmt.Println(strings.Contains(topic, "\n"))
-			for _, chr := range(topic) {
-				fmt.Println((int)(chr))
-			}
 			broker.subscriptions <- Subscription{
 				inbox: p.inbox,
 				topic: strings.Trim(line, "\r\n")}
@@ -106,7 +100,6 @@ func sendBroadcasts(p Peer, broker *Broker) {
 // out on the TCP connection.
 func deliverBroadcasts(p Peer) {
 	for msg := range(p.inbox) {
-		fmt.Println("Got a message!")
 		payload := msg.topic + ": " + msg.body
 		_, err := p.conn.Write(([]byte)(payload))
 		if err != nil {
@@ -131,21 +124,16 @@ func connectPeer(conn net.Conn, broker *Broker) *Peer {
 func runBroker(broker Broker) {
 	topics := make(map[string]Topic)
 	for {
-		fmt.Println("Selecting...")
 		select {
 		case sub := <-broker.subscriptions:
-			fmt.Println("Got a subscription.")
 			topic, topicExists := topics[sub.topic]
 			if !topicExists {
 				topic = make(Topic, 0)
 			}
 			topics[sub.topic] = append(topic, sub.inbox)
 		case msg := <-broker.broadcasts:
-			fmt.Println("Got a broadcast.")
-			fmt.Println("Topic: ", msg.topic)
 			topic, _ := topics[msg.topic]
 			for _, recipient := range(topic) {
-				fmt.Println("Attempting delivery...")
 				// Non-blocking send. If recipient's inbox is full, they
 				// don't get the message.
 				select {
