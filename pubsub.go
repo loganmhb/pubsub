@@ -1,10 +1,9 @@
 package main
 
 import (
-//	"bufio"
-//	"fmt"
+	//	"bufio"
 	"net"
-//	"strings"
+	"strings"
 )
 
 // Basic idea: simplest possible pub/sub server (just TCP, no persistence, etc)
@@ -45,6 +44,24 @@ import (
 // Disconnected peers are currently not handled, which is a problem if this thing
 // runs for long enough, of course.
 
+// The Client interface is implemented by peers, handling network connections and
+// receiving messages.
+type Client interface {
+	Deliver(Msg)
+}
+
+// The Dispatcher interfact is implemented by the broker, and handles
+// broadcasting messages and tracking which clients are subscribed to
+// which topics.
+type Dispatcher interface {
+	// used for sending a message
+	Broadcast(Msg)
+	// used to subscribe a peer to a topic
+	Subscribe(Client, string)
+	// used to remove all references to a peer, e.g. in case of network error
+	Disconnect(Client)
+}
+
 type Peer struct {
 	inbox chan Msg
 	conn  net.Conn
@@ -56,44 +73,78 @@ type Msg struct {
 }
 
 type Subscription struct {
-	topic string
-	client  Client
+	topic  string
+	client Client
 }
 
 type Broker struct {
 	subscriptions  chan Subscription
 	broadcasts     chan Msg
-	disconnections chan *Client
-	topics         map[string]([]*Client)
+	disconnections chan Client
+	topics         map[string]([]Client)
 }
 
 func NewBroker() *Broker {
 	return &Broker{
-		subscriptions: make(chan Subscription, 100),
-		broadcasts: make(chan Msg, 100),
-		disconnections: make(chan *Client),
-		topics: make(map[string]([]*Client))}
+		subscriptions:  make(chan Subscription),
+		broadcasts:     make(chan Msg),
+		disconnections: make(chan Client),
+		topics:         make(map[string]([]Client))}
 }
 
-type Client interface {
-	Deliver(Msg)	
+// Starts a loop listening for incoming broadcast and subscription
+// requests, handling each appropriately -- for subscription requests,
+// adds a peer to a topic, for broadcast requests, broadcasts the
+// message to subscribed peers.
+func (b *Broker) Run() {
+	for {
+		select {
+		case sub := <-b.subscriptions:
+			topic, topicExists := b.topics[sub.topic]
+			if !topicExists {
+				topic = make([]Client, 0)
+			}
+			b.topics[sub.topic] = append(topic, sub.client)
+		case msg := <-b.broadcasts:
+			topic, _ := b.topics[msg.topic]
+			for _, client := range topic {
+				client.Deliver(msg)
+			}
+		}
+	}
 }
 
-type Dispatcher interface {
-	// used for sending a message
-	Broadcast(Msg)
-	// used to subscribe a peer to a topic
-	Subscribe(*Client, string)
-	// used to remove all references to a peer, e.g. in case of network error
-	Disconnect(*Client)
-}
-
+// Sends the broker a message to broadcast.
 func (b *Broker) Broadcast(msg Msg) {
-	
+	b.broadcasts <- msg
 }
 
+// Sends the broker a subscription request to add a client to a topic.
 func (b *Broker) Subscribe(sub Subscription) {
 	b.subscriptions <- sub
+}
+
+// Parses messages off the wire into subscription requests and message
+// broadcasts.
+func (p *Peer) ParseLine(line string) interface{} {
+	if strings.Contains(line, ":") {
+		idx := strings.Index(line, ":")
+		return Msg{topic: line[:idx], body: line[idx+1:]}
+	} else {
+		return Subscription{client: p, topic: line}
+	}
+}
+
+// Peer.Deliver implements a non-blocking send. If a Peer's inbox is
+// full, then it doesn't get the message (presumably there's a problem
+// with the connection).
+func (p *Peer) Deliver(m Msg) {
+	select {
+	case p.inbox <- m:
+		// message delivered
+	default:
+		// message not delivered -- any action needed? disconnect peer?
+	}
 }
 
 // // Parses messages from the peer's TCP connection and forwards them to
@@ -101,7 +152,7 @@ func (b *Broker) Subscribe(sub Subscription) {
 // func sendBroadcasts(p Peer, broker *Broker) {
 // 	reader := bufio.NewReader(p.conn)
 
-// 	for 
+// 	for
 // 		line, err := reader.ReadString('\n')
 
 // 		if err != nil {
@@ -114,9 +165,6 @@ func (b *Broker) Subscribe(sub Subscription) {
 
 // 		if strings.Contains(line, ":") {
 // 			// It's a pub.
-// 			idx := strings.Index(line, ":")
-// 			msg := Msg{topic: line[:idx], body: line[idx+1:]}
-// 			broker.broadcasts <- msg
 // 		} else {
 // 			broker.subscriptions <- Subscription{
 // 				inbox: p.inbox,
@@ -154,25 +202,7 @@ func (b *Broker) Subscribe(sub Subscription) {
 // 	topics := make(map[string]Topic)
 // 	for {
 // 		select {
-// 		case sub := <-broker.subscriptions:
-// 			topic, topicExists := topics[sub.topic]
-// 			if !topicExists {
-// 				topic = make(Topic, 0)
-// 			}
-// 			topics[sub.topic] = append(topic, sub.inbox)
-// 		case msg := <-broker.broadcasts:
-// 			topic, _ := topics[msg.topic]
-// 			for _, recipient := range topic {
-// 				// Non-blocking send. If recipient's inbox is full, they
-// 				// don't get the message.
-// 				select {
-// 				case recipient <- msg:
-// 					continue
-// 				default:
-// 					fmt.Println("Failed to deliver message to peer.")
-// 				}
-// 			}
-// 		}
+//
 // 	}
 // }
 
