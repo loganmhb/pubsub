@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -13,29 +14,32 @@ func (p *StubPeer) Deliver(m Msg) {
 	p.msgsReceived = append(p.msgsReceived, m)
 }
 
+func (p *StubPeer) Connect(stream LineStream, broker Dispatcher) {}
+
+func NewStubPeer() *StubPeer {
+	return &StubPeer{msgsReceived: make([]Msg, 0)}
+}
+
 func TestBrokerSubscribe(t *testing.T) {
-	peer := &StubPeer{msgsReceived: make([]Msg, 0)}
-	subscription := &Subscription{topic: "hi", client: peer}
+	peer := NewStubPeer()
 	broker := NewBroker()
 	go broker.Run()
-	broker.Subscribe(*subscription)	
+	broker.Subscribe(Subscription{client: peer, topic: "hi"})
 	if broker.topics["hi"][0] != peer {
 		t.Fail()
 	}
 }
 
-func TestPeersReceiveMessages(t *testing.T) {
-	peer := &StubPeer{msgsReceived: make([]Msg, 0)}
-	peer2 := &StubPeer{msgsReceived: make([]Msg, 0)}
-	subscription := &Subscription{topic: "hi", client: peer}
-	subscription2 := &Subscription{topic: "hi", client: peer2}
-	message := &Msg{topic: "hi", body:"test"}
+func TestBrokerDeliversMessages(t *testing.T) {
+	peer := NewStubPeer()
+	peer2 := NewStubPeer()
+	message := &Msg{topic: "hi", body: "test"}
 	broker := NewBroker()
 	go broker.Run()
-	broker.Subscribe(*subscription)
-	broker.Subscribe(*subscription2)
+	broker.Subscribe(Subscription{client: peer, topic: "hi"})
+	broker.Subscribe(Subscription{client: peer2, topic: "hi"})
 	broker.Broadcast(*message)
-	for (len(peer.msgsReceived) < 1) {
+	for len(peer.msgsReceived) < 1 {
 		time.Sleep(5)
 	}
 	if peer.msgsReceived[0] != *message {
@@ -56,8 +60,43 @@ func TestMessageParsing(t *testing.T) {
 	if !(m == Msg{topic: "topic", body: "i'm a message"}) {
 		t.Fail()
 	}
-	if !(s == Subscription{topic:"i'm a topic subscription", client: &peer}) {
+	if !(s == Subscription{topic: "i'm a topic subscription", client: &peer}) {
 		t.Fail()
 	}
 }
 
+type MockStream struct {
+	linesToSend  chan string
+	linesWritten chan string
+}
+
+func NewMockStream() *MockStream {
+	return &MockStream{linesToSend: make(chan string, 5), linesWritten: make(chan string, 5)}
+}
+
+func (m *MockStream) ReadLine() (string, error) {
+	return <-m.linesToSend, nil
+}
+
+func (m *MockStream) WriteLine(line string) error {
+	select {
+	case m.linesWritten <- line:
+		return nil
+	default:
+		return errors.New("Could not write line!")
+	}
+}
+
+func TestPeerBroadcastsMessage(t *testing.T) {
+	peer := NewPeer()
+	stream := NewMockStream()
+	broker := NewBroker()
+	go broker.Run()
+	peer.Connect(stream, broker)
+	stream.linesToSend <- "topic"         // subscription
+	stream.linesToSend <- "topic:message" // broadcast
+	result := <-stream.linesWritten
+	if result != "topic:message" { // peer has received this message from itself
+		t.Fail()
+	}
+}

@@ -1,7 +1,8 @@
 package main
 
 import (
-	//	"bufio"
+	"fmt"
+	"bufio"
 	"net"
 	"strings"
 )
@@ -48,18 +49,26 @@ import (
 // receiving messages.
 type Client interface {
 	Deliver(Msg)
+	Connect(LineStream, Dispatcher)
 }
 
-// The Dispatcher interfact is implemented by the broker, and handles
+// The Dispatcher interface is implemented by the broker, and handles
 // broadcasting messages and tracking which clients are subscribed to
 // which topics.
 type Dispatcher interface {
 	// used for sending a message
 	Broadcast(Msg)
 	// used to subscribe a peer to a topic
-	Subscribe(Client, string)
+	Subscribe(Subscription)
 	// used to remove all references to a peer, e.g. in case of network error
 	Disconnect(Client)
+}
+
+// LineStream encapsulates the behavior of the TCP connection that
+// we'll be using, which will be helpful for testing.
+type LineStream interface {
+	ReadLine() (string, error)
+	WriteLine(string) error
 }
 
 type Peer struct {
@@ -124,8 +133,51 @@ func (b *Broker) Subscribe(sub Subscription) {
 	b.subscriptions <- sub
 }
 
-// Parses messages off the wire into subscription requests and message
-// broadcasts.
+//TODO disconnect a client (e.g. unsubscribe from all channels)
+func (b *Broker) Disconnect(client Client) {
+
+}
+
+func NewPeer() *Peer {
+	return &Peer{inbox: make(chan Msg, 100)}
+}
+
+// Connect "connects" a peer to the broker, starting two goroutines. One reads
+// lines off the stream, parses them into events (subscriptions,
+// broadcasts), and sends them to the broker. The other listens for
+// broadcasts on the peer's inbox and writes messages out onto the
+// stream.
+func (p *Peer) Connect(stream LineStream, broker Dispatcher) {
+	go func() {
+		for {
+			line, err := stream.ReadLine()
+			if err != nil {
+				panic("unhandled error!")
+			}
+
+			event := p.ParseLine(line)
+			switch event.(type) {
+			case Msg:
+				broker.Broadcast(event.(Msg))
+			case Subscription:
+				broker.Subscribe(event.(Subscription))
+			}
+		}
+	}()
+
+	go func() {
+		for broadcast := range p.inbox {
+			s := broadcast.topic + ":" + broadcast.body
+			err := stream.WriteLine(s)
+			if err != nil {
+				panic("unhandled error writing to stream!")
+			}
+		}
+	}()
+}
+
+// ParseLine parses message strings (presumably from off the wire)
+// into subscription requests and message broadcasts.
 func (p *Peer) ParseLine(line string) interface{} {
 	if strings.Contains(line, ":") {
 		idx := strings.Index(line, ":")
@@ -147,86 +199,45 @@ func (p *Peer) Deliver(m Msg) {
 	}
 }
 
-// // Parses messages from the peer's TCP connection and forwards them to
-// // the broker for broadcasting.
-// func sendBroadcasts(p Peer, broker *Broker) {
-// 	reader := bufio.NewReader(p.conn)
+// NetworkStream is a LineStream implementation for a TCP connection.
+type NetworkStream struct {
+	reader *bufio.Reader
+	conn net.Conn
+}
 
-// 	for
-// 		line, err := reader.ReadString('\n')
+func NewNetworkStream(conn net.Conn) NetworkStream {
+	return NetworkStream{reader: bufio.NewReader(conn), conn: conn}
+}
 
-// 		if err != nil {
-// 			if err.Error() != "EOF" {
-// 				fmt.Println("Error reading from connection ", p.conn, ", closing.")
-// 				fmt.Println(err)
-// 			}
-// 			break
-// 		}
+func (s NetworkStream) ReadLine() (string, error) {
+	line, err := s.reader.ReadString('\n')
 
-// 		if strings.Contains(line, ":") {
-// 			// It's a pub.
-// 		} else {
-// 			broker.subscriptions <- Subscription{
-// 				inbox: p.inbox,
-// 				topic: strings.Trim(line, "\r\n")}
-// 		}
-// 	}
-// }
+	return line, err
+}
 
-// // Listens for broadcasts arriving in the peer's inbox and writes them
-// // out on the TCP connection.
-// func deliverBroadcasts(p Peer) {
-// 	for msg := range p.inbox {
-// 		payload := msg.topic + ": " + msg.body
-// 		_, err := p.conn.Write(([]byte)(payload))
-// 		if err != nil {
-// 			fmt.Println("Error writing to conn: ", err)
-// 			break
-// 		}
-// 	}
-// }
+func (s NetworkStream) WriteLine(line string) error {
+	_, err := s.conn.Write(([]byte)(line))
+	return err
+}
 
-// func connectPeer(conn net.Conn, broker *Broker) *Peer {
-// 	// Each conn requires two goroutines: one to listen for incoming messages,
-// 	// and one to deliver outgoing messages.
-// 	inbox := make(chan Msg, 100)
+func main() {
+	ln, err := net.Listen("tcp", ":8000")
 
-// 	peer := Peer{inbox: inbox, conn: conn}
-// 	go deliverBroadcasts(peer)
-// 	go sendBroadcasts(peer, broker)
+	if err != nil {
+		panic(err)
+	}
 
-// 	return &peer
-// }
+	broker := NewBroker()
+	go broker.Run()
 
-// func runBroker(broker Broker) {
-// 	topics := make(map[string]Topic)
-// 	for {
-// 		select {
-//
-// 	}
-// }
-
-// func main() {
-// 	ln, err := net.Listen("tcp", ":8000")
-
-// 	if err != nil {
-// 		panic(err)
-// 	}
-
-// 	outbox := make(chan Msg, 100)
-// 	subscriptions := make(chan Subscription, 100)
-// 	broker := Broker{broadcasts: outbox, subscriptions: subscriptions}
-
-// 	go runBroker(broker)
-
-// 	for {
-// 		conn, err := ln.Accept()
-// 		if err != nil {
-// 			fmt.Println("Error accepting connection: ", err)
-// 		} else {
-// 			connectPeer(conn, &broker)
-// 		}
-// 	}
-// }
-
-func main() {}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err)
+		} else {
+			peer := NewPeer()
+			stream := NewNetworkStream(conn)
+			peer.Connect(stream, broker)
+		}
+	}
+}
