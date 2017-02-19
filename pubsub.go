@@ -195,6 +195,7 @@ func (p *Peer) Deliver(m Msg) {
 	case p.inbox <- m:
 		// message delivered
 	default:
+		fmt.Println("Failed to deliver message to peer.")
 		// message not delivered -- any action needed? disconnect peer?
 	}
 }
@@ -212,11 +213,11 @@ func NewNetworkStream(conn net.Conn) NetworkStream {
 func (s NetworkStream) ReadLine() (string, error) {
 	line, err := s.reader.ReadString('\n')
 
-	return line, err
+	return strings.Trim(line, "\r\n"), err
 }
 
 func (s NetworkStream) WriteLine(line string) error {
-	_, err := s.conn.Write(([]byte)(line))
+	_, err := s.conn.Write(([]byte)(line + "\r\n"))
 	return err
 }
 
