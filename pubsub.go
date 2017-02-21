@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"bufio"
+	"fmt"
 	"net"
 	"strings"
 )
@@ -87,18 +87,18 @@ type Subscription struct {
 }
 
 type Broker struct {
-	subscriptions  chan Subscription
-	broadcasts     chan Msg
-	disconnections chan Client
-	topics         map[string]([]Client)
+	subscriptions chan Subscription
+	broadcasts    chan Msg
+	disconnects   chan Client
+	topics        map[string](map[Client]interface{})
 }
 
 func NewBroker() *Broker {
 	return &Broker{
-		subscriptions:  make(chan Subscription),
-		broadcasts:     make(chan Msg),
-		disconnections: make(chan Client),
-		topics:         make(map[string]([]Client))}
+		subscriptions: make(chan Subscription),
+		broadcasts:    make(chan Msg),
+		disconnects:   make(chan Client),
+		topics:        make(map[string](map[Client]interface{}))}
 }
 
 // Starts a loop listening for incoming broadcast and subscription
@@ -108,15 +108,20 @@ func NewBroker() *Broker {
 func (b *Broker) Run() {
 	for {
 		select {
-		case sub := <-b.subscriptions:
-			topic, topicExists := b.topics[sub.topic]
-			if !topicExists {
-				topic = make([]Client, 0)
+		case client := <-b.disconnects:
+			for topic, _ := range b.topics {
+				delete(b.topics[topic], client)
 			}
-			b.topics[sub.topic] = append(topic, sub.client)
+			fmt.Println(b.topics)
+		case sub := <-b.subscriptions:
+			_, topicExists := b.topics[sub.topic]
+			if !topicExists {
+				b.topics[sub.topic] = make(map[Client]interface{}, 0)
+			}
+			b.topics[sub.topic][sub.client] = true // value doesn't matter
 		case msg := <-b.broadcasts:
 			topic, _ := b.topics[msg.topic]
-			for _, client := range topic {
+			for client, _ := range topic {
 				client.Deliver(msg)
 			}
 		}
@@ -135,7 +140,7 @@ func (b *Broker) Subscribe(sub Subscription) {
 
 //TODO disconnect a client (e.g. unsubscribe from all channels)
 func (b *Broker) Disconnect(client Client) {
-
+	b.disconnects <- client
 }
 
 func NewPeer() *Peer {
@@ -152,7 +157,9 @@ func (p *Peer) Connect(stream LineStream, broker Dispatcher) {
 		for {
 			line, err := stream.ReadLine()
 			if err != nil {
-				panic("unhandled error!")
+				fmt.Println("Error reading from stream. Disconnecting peer", p)
+				broker.Disconnect(p)
+				break
 			}
 
 			event := p.ParseLine(line)
@@ -170,7 +177,9 @@ func (p *Peer) Connect(stream LineStream, broker Dispatcher) {
 			s := broadcast.topic + ":" + broadcast.body
 			err := stream.WriteLine(s)
 			if err != nil {
-				panic("unhandled error writing to stream!")
+				fmt.Println("Error writing to client",p,", disconnecting.")
+				broker.Disconnect(p)
+				break
 			}
 		}
 	}()
@@ -203,7 +212,7 @@ func (p *Peer) Deliver(m Msg) {
 // NetworkStream is a LineStream implementation for a TCP connection.
 type NetworkStream struct {
 	reader *bufio.Reader
-	conn net.Conn
+	conn   net.Conn
 }
 
 func NewNetworkStream(conn net.Conn) NetworkStream {

@@ -20,13 +20,21 @@ func NewStubPeer() *StubPeer {
 	return &StubPeer{msgsReceived: make([]Msg, 0)}
 }
 
-func TestBrokerSubscribe(t *testing.T) {
+func TestBrokerSubscribeAndDisconnect(t *testing.T) {
 	peer := NewStubPeer()
 	broker := NewBroker()
 	go broker.Run()
 	broker.Subscribe(Subscription{client: peer, topic: "hi"})
-	if broker.topics["hi"][0] != peer {
-		t.Fail()
+	_, exists := broker.topics["hi"][peer]
+	if !exists {
+		t.Error("Subscription not created")
+	}
+
+	broker.Disconnect(peer)
+	time.Sleep(10000)
+	_, exists = broker.topics["hi"][peer]
+	if exists {
+		t.Error("Unsubscribing failed")
 	}
 }
 
