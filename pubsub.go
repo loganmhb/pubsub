@@ -33,17 +33,15 @@ import (
 // If the topic doesn't yet exist, subscribing to it will create it. Publishing to
 // a topic to which no peers are subscribed is a no-op.
 //
-// Subscriptions are stored in a map of topic name (string) to list of
-// inboxes (a channel belonging to a peer). In order to subscribe to a
-// new topic, a peer sends a message on a special subscription channel
-// with the peer's inbox and the desired topic name. When a peer
-// connects, two goroutines start: one to parse messages coming in on
-// the connection and send them to the broker for distribution, and
-// one to write broadcasted messages from the broker back to the
-// client.
-//
-// Disconnected peers are currently not handled, which is a problem if this thing
-// runs for long enough, of course.
+// Subscriptions are stored in a map of topic name (string) to a map
+// of peers. In order to subscribe to a new topic, a peer sends a
+// message on a special subscription channel with the peer itself and
+// the desired topic name. When a peer connects, two goroutines start:
+// one to parse messages coming in on the connection and send them to
+// the broker for distribution, and one to write broadcasted messages
+// from the broker back to the client. If the connection closes or
+// encounters an error, the peer will be removed from the broker's
+// topic registry.
 
 // The Client interface is implemented by peers, handling network connections and
 // receiving messages.
